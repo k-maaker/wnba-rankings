@@ -335,16 +335,31 @@ def ingest_bigdataball(games: pd.DataFrame, bdb: pd.DataFrame) -> pd.DataFrame:
 def ingest_bigdataball_dir(games: pd.DataFrame) -> pd.DataFrame:
     if not os.path.isdir(BDB_DIR):
         return games
+    found_any = False
     for fn in sorted(os.listdir(BDB_DIR)):
         if fn.lower().endswith((".xlsx", ".xlsm")):
+            found_any = True
             fp = os.path.join(BDB_DIR, fn)
             print(f"Ingesting BigDataBall file: {fn}")
             try:
                 bdb = parse_bigdataball_xlsx(fp)
+                before = games.dropna(subset=["spread_home", "total"]).shape[0]
                 games = ingest_bigdataball(games, bdb)
-                print(f"  matched/added lines for {len(bdb)} games")
+                after = games.dropna(subset=["spread_home", "total"]).shape[0]
+                print(f"  parsed {len(bdb)} games; market lines "
+                      f"{before} -> {after}")
+                if after <= before:
+                    print("  !! WARNING: no new lines were merged — check that "
+                          "team names/dates in the file match.")
+            except ImportError:
+                print("  !! ERROR: openpyxl is not installed, cannot read .xlsx. "
+                      "Add 'openpyxl' to the workflow's pip install step.",
+                      file=sys.stderr)
             except Exception as e:  # noqa: BLE001
-                print(f"  ! failed to ingest {fn}: {e}", file=sys.stderr)
+                print(f"  !! ERROR ingesting {fn}: {e}", file=sys.stderr)
+    if not found_any:
+        print("No BigDataBall .xlsx found in data/bigdataball/ "
+              "(model will use game results only).")
     return games
 
 
