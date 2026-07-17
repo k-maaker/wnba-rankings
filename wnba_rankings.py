@@ -171,8 +171,7 @@ def load_games() -> pd.DataFrame:
 
 def merge_games(existing: pd.DataFrame, new_rows: list[dict]) -> pd.DataFrame:
     """Merge, never clobbering a stored line/score with a missing value."""
-    df = existing.set_index("game_id") if len(existing) else pd.DataFrame(
-        columns=existing.columns).set_index(pd.Index([], name="game_id"))
+    df = existing.set_index("game_id") if len(existing) else pd.DataFrame( columns=[c for c in existing.columns if c != "game_id"] ).set_index(pd.Index([], name="game_id"))
     for r in new_rows:
         gid = str(r["game_id"])
         if gid in df.index:
