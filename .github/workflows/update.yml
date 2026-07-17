@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install numpy pandas
+      - run: pip install numpy pandas openpyxl
 
       - name: Fetch results & lines, rebuild rankings
         run: python wnba_rankings.py
