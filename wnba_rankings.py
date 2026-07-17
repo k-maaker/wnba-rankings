@@ -133,8 +133,8 @@ def parse_scoreboard(js: dict) -> list[dict]:
         away = next((t for t in teams if t.get("homeAway") == "away"), None)
         if not home or not away:
             continue
-        h = norm_team(home["team"]["abbreviation"])
-        a = norm_team(away["team"]["abbreviation"])
+        h = norm_team(home["team"]["abbreviation"]) 
+        a = norm_team(away["team"]["abbreviation"]) if h not in TEAM_NAMES or a not in TEAM_NAMES: continue # exhibition vs. national team, All-Star game, etc.
         status = (ev.get("status") or {}).get("type", {})
         final = bool(status.get("completed"))
         row = {
@@ -164,7 +164,7 @@ def load_games() -> pd.DataFrame:
     cols = ["game_id", "date", "home", "away",
             "home_score", "away_score", "spread_home", "total"]
     if os.path.exists(GAMES_CSV):
-        df = pd.read_csv(GAMES_CSV, dtype={"game_id": str})
+        df = pd.read_csv(GAMES_CSV, dtype={"game_id": str}) df = df[df.home.isin(TEAM_NAMES) & df.away.isin(TEAM_NAMES)]
         return df[cols]
     return pd.DataFrame(columns=cols)
 
