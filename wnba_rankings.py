@@ -46,8 +46,9 @@ OUT_DIR = os.path.join(BASE, "docs")   # GitHub Pages serves /docs
 GAMES_CSV = os.path.join(DATA_DIR, "games.csv")
 HISTORY_CSV = os.path.join(DATA_DIR, "history.csv")
 
-SEASON_START = os.environ.get("WNBA_SEASON_START", "2026-05-01")
+SEASON_START = os.environ.get("WNBA_SEASON_START", "2026-05-08")
 EASTERN = ZoneInfo("America/New_York")
+BDB_DIR = os.path.join(DATA_DIR, "bigdataball")
 
 ODDS_DENOM = 0.25     # market-line weight: 1/(elapsed + 0.25)
 RESULT_DENOM = 3.50   # game-result weight: 1/(elapsed + 3.5)
@@ -84,6 +85,7 @@ TEAM_NAMES = {
     "TOR": "Toronto Tempo", "CHI": "Chicago Sky", "WAS": "Washington Mystics",
     "SEA": "Seattle Storm", "PDX": "Portland Fire", "CON": "Connecticut Sun",
 }
+FULLNAME_TO_ABBR = {v: k for k, v in TEAM_NAMES.items()}
 
 
 def norm_team(abbr: str) -> str:
@@ -139,9 +141,15 @@ def parse_scoreboard(js: dict) -> list[dict]:
             continue  # exhibition vs. national team, All-Star game, etc.
         status = (ev.get("status") or {}).get("type", {})
         final = bool(status.get("completed"))
+        raw_date = ev.get("date", "")
+        try:  # ESPN timestamps are UTC; convert to ET so late West Coast
+            game_date = (dt.datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                         .astimezone(EASTERN).date().isoformat())
+        except ValueError:
+            game_date = raw_date[:10]
         row = {
             "game_id": ev.get("id"),
-            "date": ev.get("date", "")[:10],
+            "date": game_date,
             "home": h, "away": a,
             "home_score": int(home["score"]) if final and home.get("score") else np.nan,
             "away_score": int(away["score"]) if final and away.get("score") else np.nan,
@@ -202,6 +210,142 @@ def fetch_range(start: dt.date, end: dt.date) -> list[dict]:
             print(f"  ! {d}: {e}", file=sys.stderr)
         d += dt.timedelta(days=1)
     return rows
+
+
+# ----------------------------------------------------------------------------
+# BigDataBall xlsx ingestion (real closing lines, one file per season)
+# ----------------------------------------------------------------------------
+def parse_bigdataball_xlsx(path: str) -> pd.DataFrame:
+    """Read a BigDataBall 'WNBA team feed' workbook into per-game rows with
+    real opening/closing spreads and totals. Any file dropped in
+    data/bigdataball/ is picked up automatically each run."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    sheet_name = next(
+        (s for s in wb.sheetnames if re.match(r"^WNBA-\d{4}-TEAM$", s)), None
+    ) or next(
+        (s for s in wb.sheetnames
+         if s.upper() not in ("METADATA", "TEAMS", "CONVERT DATE FORMAT")),
+        wb.sheetnames[0],
+    )
+    ws = wb[sheet_name]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return pd.DataFrame()
+    header = [str(h).replace("\n", " ").strip() if h else h for h in rows[0]]
+    idx = {name: i for i, name in enumerate(header)}
+
+    def col(name):
+        return idx.get(name)
+
+    i_gid, i_date, i_team, i_venue, i_f = (
+        col("GAME-ID"), col("DATE"), col("TEAMS"), col("VENUE"), col("F"))
+    i_cs, i_cou = col("CLOSING SPREAD"), col("CLOSING O/U")
+    i_os, i_oou = col("OPENING SPREAD"), col("OPENING O/U")
+    if None in (i_gid, i_date, i_team, i_venue, i_f):
+        print("  ! bigdataball: unrecognized column layout, skipping", file=sys.stderr)
+        return pd.DataFrame()
+
+    def to_iso(d):
+        if isinstance(d, dt.datetime):
+            return d.date().isoformat()
+        if isinstance(d, dt.date):
+            return d.isoformat()
+        m, dd, y = str(d).split("/")
+        return f"{y}-{int(m):02d}-{int(dd):02d}"
+
+    def to_num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    games: dict[str, dict] = {}
+    for r in rows[1:]:
+        if not r or r[i_gid] is None:
+            continue
+        gid = str(r[i_gid])
+        abbr = FULLNAME_TO_ABBR.get(r[i_team])
+        if abbr is None:
+            continue  # exhibition / national-team / unmapped row
+        g = games.setdefault(gid, {"date": to_iso(r[i_date])})
+        spread = to_num(r[i_cs]) if i_cs is not None else None
+        if spread is None and i_os is not None:
+            spread = to_num(r[i_os])
+        total = to_num(r[i_cou]) if i_cou is not None else None
+        if total is None and i_oou is not None:
+            total = to_num(r[i_oou])
+        if r[i_venue] == "Home":
+            g["home"] = abbr
+            g["home_score"] = to_num(r[i_f])
+            g["spread_home"] = spread  # home row's own spread is already home-signed
+        else:
+            g["away"] = abbr
+            g["away_score"] = to_num(r[i_f])
+        if total is not None:
+            g["total"] = total
+
+    out = [dict(bdb_id=gid, **g) for gid, g in games.items()
+           if "home" in g and "away" in g]
+    return pd.DataFrame(out)
+
+
+def ingest_bigdataball(games: pd.DataFrame, bdb: pd.DataFrame) -> pd.DataFrame:
+    """Overlay BigDataBall's real spreads/totals (and backfill any missing
+    scores) onto the existing games table, matched by date+home+away."""
+    if bdb.empty:
+        return games
+    df = games.set_index("game_id")
+    by_pair: dict[tuple, list] = {}
+    for gid, row in df.iterrows():
+        by_pair.setdefault((row.home, row.away), []).append((row.date, gid))
+
+    def find_gid(date_str, home, away):
+        target = dt.date.fromisoformat(date_str)
+        best_gid, best_diff = None, None
+        for cand_date, cand_gid in by_pair.get((home, away), []):
+            diff = abs((dt.date.fromisoformat(cand_date) - target).days)
+            if diff <= 1 and (best_diff is None or diff < best_diff):
+                best_gid, best_diff = cand_gid, diff
+        return best_gid
+
+    for _, r in bdb.iterrows():
+        gid = find_gid(r.date, r.home, r.away)
+        if gid is not None:
+            if pd.notna(r.get("spread_home")):
+                df.loc[gid, "spread_home"] = r["spread_home"]
+            if pd.notna(r.get("total")):
+                df.loc[gid, "total"] = r["total"]
+            if pd.isna(df.loc[gid, "home_score"]) and pd.notna(r.get("home_score")):
+                df.loc[gid, "home_score"] = r["home_score"]
+            if pd.isna(df.loc[gid, "away_score"]) and pd.notna(r.get("away_score")):
+                df.loc[gid, "away_score"] = r["away_score"]
+        else:
+            new_gid = f"bdb_{r['bdb_id']}"
+            df.loc[new_gid] = {
+                "date": r["date"], "home": r["home"], "away": r["away"],
+                "home_score": r.get("home_score"), "away_score": r.get("away_score"),
+                "spread_home": r.get("spread_home"), "total": r.get("total"),
+            }
+    return (df.reset_index().rename(columns={"index": "game_id"})
+              .sort_values("date").reset_index(drop=True))
+
+
+def ingest_bigdataball_dir(games: pd.DataFrame) -> pd.DataFrame:
+    if not os.path.isdir(BDB_DIR):
+        return games
+    for fn in sorted(os.listdir(BDB_DIR)):
+        if fn.lower().endswith((".xlsx", ".xlsm")):
+            fp = os.path.join(BDB_DIR, fn)
+            print(f"Ingesting BigDataBall file: {fn}")
+            try:
+                bdb = parse_bigdataball_xlsx(fp)
+                games = ingest_bigdataball(games, bdb)
+                print(f"  matched/added lines for {len(bdb)} games")
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! failed to ingest {fn}: {e}", file=sys.stderr)
+    return games
 
 
 # ----------------------------------------------------------------------------
@@ -528,7 +672,9 @@ def main():
             start = last - dt.timedelta(days=2)  # small overlap to catch late finals
         print(f"Fetching {start} .. {today_et}")
         games = merge_games(games, fetch_range(start, today_et))
-        games.to_csv(GAMES_CSV, index=False)
+
+    games = ingest_bigdataball_dir(games)
+    games.to_csv(GAMES_CSV, index=False)
 
     usable = games.dropna(subset=["spread_home", "total"])
     finals = games.dropna(subset=["home_score", "away_score"])
