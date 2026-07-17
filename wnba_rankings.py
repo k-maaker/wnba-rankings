@@ -133,8 +133,10 @@ def parse_scoreboard(js: dict) -> list[dict]:
         away = next((t for t in teams if t.get("homeAway") == "away"), None)
         if not home or not away:
             continue
-        h = norm_team(home["team"]["abbreviation"]) 
-        a = norm_team(away["team"]["abbreviation"]) if h not in TEAM_NAMES or a not in TEAM_NAMES: continue # exhibition vs. national team, All-Star game, etc.
+        h = norm_team(home["team"]["abbreviation"])
+        a = norm_team(away["team"]["abbreviation"])
+        if h not in TEAM_NAMES or a not in TEAM_NAMES:
+            continue  # exhibition vs. national team, All-Star game, etc.
         status = (ev.get("status") or {}).get("type", {})
         final = bool(status.get("completed"))
         row = {
@@ -164,14 +166,17 @@ def load_games() -> pd.DataFrame:
     cols = ["game_id", "date", "home", "away",
             "home_score", "away_score", "spread_home", "total"]
     if os.path.exists(GAMES_CSV):
-        df = pd.read_csv(GAMES_CSV, dtype={"game_id": str}) df = df[df.home.isin(TEAM_NAMES) & df.away.isin(TEAM_NAMES)]
+        df = pd.read_csv(GAMES_CSV, dtype={"game_id": str})
+        df = df[df.home.isin(TEAM_NAMES) & df.away.isin(TEAM_NAMES)]
         return df[cols]
     return pd.DataFrame(columns=cols)
 
 
 def merge_games(existing: pd.DataFrame, new_rows: list[dict]) -> pd.DataFrame:
     """Merge, never clobbering a stored line/score with a missing value."""
-    df = existing.set_index("game_id") if len(existing) else pd.DataFrame( columns=[c for c in existing.columns if c != "game_id"] ).set_index(pd.Index([], name="game_id"))
+    df = existing.set_index("game_id") if len(existing) else pd.DataFrame(
+        columns=[c for c in existing.columns if c != "game_id"]
+    ).set_index(pd.Index([], name="game_id"))
     for r in new_rows:
         gid = str(r["game_id"])
         if gid in df.index:
