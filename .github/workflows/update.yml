@@ -2,8 +2,8 @@ name: Update WNBA rankings
 
 on:
   schedule:
-    # 09:00 UTC = 5:00 AM Eastern during daylight time (the entire WNBA season).
-    - cron: "0 9 * * *"
+    # 11:00 UTC = 7:00 AM Eastern (daylight time) — after BigDataBall's ~5 AM drop.
+    - cron: "0 11 * * *"
   workflow_dispatch: {}   # manual "Run workflow" button
 
 permissions:
@@ -20,6 +20,39 @@ jobs:
           python-version: "3.12"
 
       - run: pip install numpy pandas openpyxl
+
+      - name: Pull latest BigDataBall file from Dropbox
+        env:
+          DROPBOX_FOLDER_URL: ${{ secrets.DROPBOX_FOLDER_URL }}
+        run: |
+          set -e
+          if [ -z "$DROPBOX_FOLDER_URL" ]; then
+            echo "No DROPBOX_FOLDER_URL secret set — skipping Dropbox pull."
+            exit 0
+          fi
+          # Force the link into direct-download mode (dl=1)
+          url=$(printf '%s' "$DROPBOX_FOLDER_URL" | sed 's/[?&]dl=0//')
+          case "$url" in *\?*) url="${url}&dl=1";; *) url="${url}?dl=1";; esac
+          echo "Downloading Dropbox folder..."
+          if ! curl -fsSL "$url" -o /tmp/bdb.zip; then
+            echo "!! Dropbox download failed — keeping existing file."
+            exit 0
+          fi
+          mkdir -p /tmp/bdb
+          if ! unzip -o /tmp/bdb.zip -d /tmp/bdb > /dev/null; then
+            echo "!! Could not unzip Dropbox download — keeping existing file."
+            exit 0
+          fi
+          latest=$(find /tmp/bdb -name '*wnba*team-feed*.xlsx' | sort | tail -1)
+          [ -z "$latest" ] && latest=$(find /tmp/bdb -name '*.xlsx' | sort | tail -1)
+          if [ -n "$latest" ]; then
+            mkdir -p data/bigdataball
+            rm -f data/bigdataball/*.xlsx
+            cp "$latest" data/bigdataball/
+            echo "Using: $(basename "$latest")"
+          else
+            echo "!! No .xlsx found in Dropbox folder — keeping existing file."
+          fi
 
       - name: Fetch results & lines, rebuild rankings
         run: python wnba_rankings.py
