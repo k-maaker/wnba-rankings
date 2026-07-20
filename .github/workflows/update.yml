@@ -2,8 +2,11 @@ name: Update WNBA rankings
 
 on:
   schedule:
-    # 11:00 UTC = 7:00 AM Eastern (daylight time) — after BigDataBall's ~5 AM drop.
-    - cron: "0 11 * * *"
+    # 11:13 UTC ≈ 7:13 AM Eastern (daylight time) — after BigDataBall's ~5 AM
+    # drop. Offset a few minutes past the hour on purpose: GitHub's own docs
+    # warn that jobs scheduled for exactly :00 are the most congested slot
+    # and can be delayed or skipped.
+    - cron: "13 11 * * *"
   workflow_dispatch: {}   # manual "Run workflow" button
 
 permissions:
